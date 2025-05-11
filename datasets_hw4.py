@@ -81,6 +81,24 @@ class HW4PairDataset(Dataset):
         x = random.randint(0, w - self.patch)
         return arr[y:y+self.patch, x:x+self.patch]
 
+    def _cutmix(self, a1, b1):
+        """Apply simple CutMix/linear‑mix with another random sample."""
+        j = random.randrange(len(self.pairs))
+        a2_path, b2_path = self.pairs[j]
+        a2 = np.array(Image.open(a2_path).convert("RGB"))
+        b2 = np.array(Image.open(b2_path).convert("RGB"))
+
+        if self.patch > 0:                       # 做同樣的 crop
+            a2 = self._crop(a2)
+            b2 = self._crop(b2)
+
+        lam = 0.5
+        a = (lam * a1.astype(np.float32) + (1 - lam) * a2.astype(np.float32))
+        b = (lam * b1.astype(np.float32) + (1 - lam) * b2.astype(np.float32))
+        a = np.clip(a, 0, 255).astype(np.uint8)
+        b = np.clip(b, 0, 255).astype(np.uint8)
+        return a, b
+
     def __getitem__(self, idx):
         deg_path, clean_path = self.pairs[idx]
         deg = np.array(Image.open(deg_path).convert("RGB"))
@@ -88,6 +106,10 @@ class HW4PairDataset(Dataset):
         if self.patch > 0:
             deg = self._crop(deg)
             clean = self._crop(clean)
+        # CutMix (10%)
+        if self.training and random.random() < 0.1:
+            deg, clean = self._cutmix(deg, clean)
+
         if self.training:
             cat = np.concatenate([deg, clean], axis=2)
             cat = _AUG(Image.fromarray(cat))

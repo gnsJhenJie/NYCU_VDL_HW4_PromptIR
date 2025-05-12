@@ -29,8 +29,12 @@ if __name__ == "__main__":
     model = LitPromptIR()
 
     ckpt_cb = ModelCheckpoint(
-        dirpath="ckpts", filename="promptir-{epoch:03d}-{val_PSNR:.2f}",
-        save_top_k=3, mode="max", monitor="val/PSNR")
+        dirpath="ckpts",
+        filename="promptir-{epoch:03d}-{val_PSNR:.2f}",
+        save_top_k=5,
+        mode="max",
+        monitor="val/PSNR")
+
     lr_cb = LearningRateMonitor(logging_interval="epoch")
 
     trainer = pl.Trainer(
@@ -39,7 +43,7 @@ if __name__ == "__main__":
         strategy="ddp" if args.gpus > 1 else "auto",
         precision=args.precision,
         max_epochs=args.epochs,
-        accumulate_grad_batches=args.accum,
+        accumulate_grad_batches=args.accum,       # ← 等效大 batch
         callbacks=[ckpt_cb, lr_cb],
         logger=TensorBoardLogger("logs", name="promptir_hw4"),
         gradient_clip_val=1.0,

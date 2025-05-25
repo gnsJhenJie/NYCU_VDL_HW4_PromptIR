@@ -21,6 +21,7 @@ _AUG = T.Compose([
     T.RandomHorizontalFlip(),
     T.RandomVerticalFlip(),
     T.RandomRotation(90, expand=False),
+    T.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.1),
 ])
 
 _TO_TENSOR = T.ToTensor()
@@ -106,8 +107,8 @@ class HW4PairDataset(Dataset):
         if self.patch > 0:
             deg = self._crop(deg)
             clean = self._crop(clean)
-        # CutMix (10%)
-        if self.training and random.random() < 0.1:
+        # CutMix (10%): temorarily disabled
+        if self.training and random.random() < 0.1 and False:
             deg, clean = self._cutmix(deg, clean)
 
         if self.training:

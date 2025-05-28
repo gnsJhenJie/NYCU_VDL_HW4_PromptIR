@@ -1,8 +1,8 @@
 # =============================================================
-# file: infer_hw4.py  (v3.0)  —  export pred.npz and wrap into a zip with patch=64 and TTA matching training augmentations
+# file: infer_hw4.py  (v3.1)  —  export pred.npz and wrap into a zip with patch=64, TTA matching training aug, and robust tiling
 # =============================================================
-"""Inference + `.npz` exporter for leaderboard submission with patch size 64 and Test-Time Augmentation.
-Transforms match training-time aug (8 modes).
+"""Inference + `.npz` exporter for leaderboard submission with patch size 64,
+Test-Time Augmentation matching training augmentations, and improved tiling logic.
 
 用法範例：
 ```bash
@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import zipfile
 from pathlib import Path
+from tqdm import tqdm
 
 import numpy as np
 import torch
@@ -43,23 +44,36 @@ def _pad_to_multiple(x: torch.Tensor, m: int = 8):
     return x, h, w
 
 
-def _tile_forward(model, x, tile: int, overlap: int):
-    """Tiled forward pass to avoid OOM on large images."""
-    _, _, h, w = x.shape
-    stride = tile - overlap
+def _tile_forward(model, x: torch.Tensor, tile: int, overlap: int):
+    """Tiled forward pass with overlap to avoid OOM and reduce seams."""
+    b, c, h, w = x.shape
+    # if image smaller than tile, just forward
+    if h <= tile and w <= tile and overlap == 0:
+        return model(x)
+    # compute stride and tile positions
+    stride = max(tile - overlap, 1)
+    ys = list(range(0, max(h - tile, 0) + 1, stride))
+    xs = list(range(0, max(w - tile, 0) + 1, stride))
+    if ys[-1] != h - tile:
+        ys.append(h - tile)
+    if xs[-1] != w - tile:
+        xs.append(w - tile)
+
     out = torch.zeros_like(x)
     weight = torch.zeros_like(x)
-    for y0 in range(0, h, stride):
-        for x0 in range(0, w, stride):
-            y1 = min(y0 + tile, h)
-            x1 = min(x0 + tile, w)
+    for y0 in ys:
+        for x0 in xs:
+            y1, x1 = y0 + tile, x0 + tile
             patch = x[..., y0:y1, x0:x1]
-            pad_h = tile - (y1 - y0)
-            pad_w = tile - (x1 - x0)
-            patch = torch.nn.functional.pad(
-                patch, (0, pad_w, 0, pad_h), mode="reflect")
-            pred = model(patch)[..., : y1 - y0, : x1 - x0]
-            out[..., y0:y1, x0:x1] += pred
+            # pad if necessary
+            ph, pw = patch.shape[-2:]
+            if ph < tile or pw < tile:
+                pad_h = tile - ph
+                pad_w = tile - pw
+                patch = torch.nn.functional.pad(
+                    patch, (0, pad_w, 0, pad_h), mode="reflect")
+            pred = model(patch)
+            out[..., y0:y1, x0:x1] += pred[..., :y1 - y0, :x1 - x0]
             weight[..., y0:y1, x0:x1] += 1
     return out / weight
 
@@ -75,9 +89,9 @@ def main():
     ap.add_argument(
         "--data_root", default="data/test/degraded",
         help="Folder with degraded test PNGs")
-    ap.add_argument("--tile", type=int, default=128,
+    ap.add_argument("--tile", type=int, default=64,
                     help="Patch size to tile (0 = disable tiling)")
-    ap.add_argument("--overlap", type=int, default=0,
+    ap.add_argument("--overlap", type=int, default=32,
                     help="Tile overlap (#pixels)")
     ap.add_argument("--half", action="store_true", help="FP16 inference")
     ap.add_argument("--device", default="cuda")
@@ -95,23 +109,21 @@ def main():
 
     # 定義 forward 函數
     def forward_fn(input_x: torch.Tensor) -> torch.Tensor:
-        if args.tile > 0 and max(input_x.shape[-2:]) > args.tile:
+        if args.tile > 0:
             return _tile_forward(model, input_x, args.tile, args.overlap)
         return model(input_x)
 
     # 定義 TTA 轉換與逆轉換  (training 用的 8 種模式)
-    tta_transforms = []
+    tta_transforms: list[tuple[callable, callable]] = []
     for mode in range(8):
         if mode == 0:
             def tfm(x): return x
             def inv(y): return y
         elif mode == 1:
-            def tfm(x): return torch.flip(x, dims=[-2])  # flip up/down
+            def tfm(x): return torch.flip(x, dims=[-2])
             def inv(y): return torch.flip(y, dims=[-2])
         elif mode == 2:
-            def tfm(x): return torch.rot90(
-                x, k=1, dims=[-2, -1])  # rotate 90 CCW
-
+            def tfm(x): return torch.rot90(x, k=1, dims=[-2, -1])
             def inv(y): return torch.rot90(y, k=-1, dims=[-2, -1])
         elif mode == 3:
             def tfm(x): return torch.flip(
@@ -121,7 +133,7 @@ def main():
                 torch.flip(y, dims=[-2]),
                 k=-1, dims=[-2, -1])
         elif mode == 4:
-            def tfm(x): return torch.rot90(x, k=2, dims=[-2, -1])  # rotate 180
+            def tfm(x): return torch.rot90(x, k=2, dims=[-2, -1])
             def inv(y): return torch.rot90(y, k=2, dims=[-2, -1])
         elif mode == 5:
             def tfm(x): return torch.flip(
@@ -131,9 +143,9 @@ def main():
                 torch.flip(y, dims=[-2]),
                 k=2, dims=[-2, -1])
         elif mode == 6:
-            def tfm(x): return torch.rot90(x, k=3, dims=[-2, -1])  # rotate 270
+            def tfm(x): return torch.rot90(x, k=3, dims=[-2, -1])
             def inv(y): return torch.rot90(y, k=1, dims=[-2, -1])
-        elif mode == 7:
+        else:
             def tfm(x): return torch.flip(
                 torch.rot90(x, k=3, dims=[-2, -1]), dims=[-2])
 
@@ -146,7 +158,7 @@ def main():
     root = Path(args.data_root)
 
     with torch.no_grad():
-        for img_path in sorted(root.glob("*.png")):
+        for img_path in tqdm(sorted(root.glob("*.png"))):
             # 1) load image
             img = Image.open(img_path).convert("RGB")
             x = _TO_TENSOR(img).unsqueeze(0).to(device)
